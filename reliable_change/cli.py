@@ -35,9 +35,9 @@ def main():
         p.add_argument("--set", action="append", default=[])
         p.add_argument("--variant", default="full")
         p.add_argument("--seed", type=int, default=13)
-        p.add_argument("--epochs", type=int, default=100)
-        p.add_argument("--batch-size", type=int, default=16)
-        p.add_argument("--lr", type=float, default=0.001)
+        p.add_argument("--epochs", type=int, default=120)
+        p.add_argument("--batch-size", type=int, default=8)
+        p.add_argument("--lr", type=float, default=0.00006)
         p.add_argument("--device", default="cpu")
         p.add_argument("--model")
         p.add_argument("--init")
@@ -47,7 +47,7 @@ def main():
         p.add_argument("--mask", action="store_true")
         p.add_argument("--count", type=int, default=96)
     args = parser.parse_args()
-    config = json.loads(Path(args.config).read_text()) if args.config else {}
+    config = json.loads(Path(args.config).read_text(encoding='utf-8-sig')) if args.config else {}
     for setting in args.set:
         key, value = setting.split("=", 1)
         config[key] = json.loads(value)
@@ -105,6 +105,8 @@ def main():
         np.random.seed(args.seed)
         data = read(Path(args.input) / "train.npz")
         validation = read(Path(args.input) / "validation.npz")
+        positives = float(data['y'].sum())
+        config.setdefault('positive_weight', (data['y'].size-positives)/max(positives, 1.))
         config.setdefault("input_shape", list(data["x"].shape[1:]))
         config.setdefault("classes", int(np.max(data.get("state", data["y"]))) + 1 if data["y"].ndim == 1 and data["y"].dtype.kind in "iu" else 2)
         network = method.Model(config).to(args.device)
@@ -117,10 +119,30 @@ def main():
         history, best = [], float("inf")
         start = time.perf_counter()
         for epoch in range(args.epochs):
+            warmup = min(5, args.epochs)
+            factor = (epoch+1)/warmup if epoch < warmup else .5*(1+np.cos(np.pi*(epoch-warmup+1)/max(args.epochs-warmup, 1)))
+            for group in optimizer.param_groups:
+                group['lr'] = args.lr*factor
             network.train()
             train_loss = 0.
             for indices in np.array_split(np.random.permutation(len(data["x"])), max(1, int(np.ceil(len(data["x"]) / args.batch_size)))):
                 batch = tensor_batch(data, indices, args.device)
+                if config.get('augment', True):
+                    dims = [axis for axis in [-2, -1] if torch.rand(()) < .5]
+                    turns = int(torch.randint(4, ()))
+                    for key in ['x', 'y', 'quality']:
+                        if key in batch:
+                            value = batch[key]
+                            if dims:
+                                value = torch.flip(value, dims)
+                            batch[key] = torch.rot90(value, turns, [-2, -1])
+                    size = min(config.get('crop_size', 512), *batch['x'].shape[-2:])
+                    top = int(torch.randint(batch['x'].shape[-2]-size+1, ()))
+                    left = int(torch.randint(batch['x'].shape[-1]-size+1, ()))
+                    for key in ['x', 'y', 'quality']:
+                        if key in batch:
+                            batch[key] = batch[key][..., top:top+size, left:left+size]
+                    batch['x'][:, :6] *= .9+.2*torch.rand((), device=args.device)
                 prediction = network(batch)
                 loss = network.objective(batch, prediction)
                 if not torch.isfinite(loss):
@@ -131,20 +153,27 @@ def main():
                 train_loss += float(loss.detach()) * len(indices)
             network.eval()
             total = 0.
+            true_positive = false_positive = false_negative = 0
             for begin in range(0, len(validation["x"]), args.batch_size):
                 indices = np.arange(begin, min(begin + args.batch_size, len(validation["x"])))
                 batch = tensor_batch(validation, indices, args.device)
-                prediction = network(batch)
-                total += float(network.objective(batch, prediction).detach()) * len(indices)
-            score = total / len(validation["x"])
-            history.append({"epoch": epoch + 1, "training_loss": train_loss / len(data["x"]), "validation_loss": score})
+                with torch.no_grad():
+                    prediction = network(batch)
+                    total += float(network.objective(batch, prediction)) * len(indices)
+                    positive, target = prediction['probability'] >= .5, batch['y'] >= .5
+                    true_positive += int((positive & target).sum())
+                    false_positive += int((positive & ~target).sum())
+                    false_negative += int((~positive & target).sum())
+            f1 = 2*true_positive/max(2*true_positive+false_positive+false_negative, 1)
+            score = 1-f1
+            history.append({"epoch": epoch + 1, "training_loss": train_loss / len(data["x"]), "validation_loss": total/len(validation['x']), 'validation_f1': f1})
             if score < best:
                 best = score
                 torch.save({"state": network.state_dict(), "config": config, "training_groups": np.unique(data.get("group", np.arange(len(data["x"])))).tolist(), "validation_groups": np.unique(validation.get("group", np.arange(len(validation["x"])))).tolist()}, out / "model.pt")
         dump(out / "history.json", history)
         dump(out / "training.json", {
             "seconds": time.perf_counter() - start,
-            "best_validation_loss": best,
+            "best_validation_f1": 1-best,
             "seed": args.seed,
             "epochs": args.epochs,
             "batch_size": args.batch_size,
@@ -197,7 +226,8 @@ def main():
             if args.device.startswith("cuda"):
                 torch.cuda.synchronize()
             start = time.perf_counter()
-            prediction = network(batch)
+            with torch.no_grad():
+                prediction = network(batch)
             if "classification_temperature" in state and "probability" in prediction:
                 prediction["probability"] = (prediction["probability"].clamp_min(1e-10).log() / state["classification_temperature"]).softmax(-1)
             if "interval_expansion" in state:

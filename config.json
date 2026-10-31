@@ -1,4 +1,1 @@
-{
-  "width": 24,
-  "alignment_radius": 1
-}
+{"widths":[64,128,256,512],"alignment_bound":4,"alignment_temperature":0.1}
