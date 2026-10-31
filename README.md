@@ -79,11 +79,34 @@ Loss weights are region WBCE+Lovasz plus .3 change margin (L1 reference/post emb
 
 ## Evidence boundary and executed verification
 
-This revision replaces the earlier single-scale generic network with the stated multiscale mechanism. It is an implementation, not the original retained server run or evidence for the paper's numerical tables. The convolutional block details, GroupNorm and shared projections are explicit choices where exact weights/blocks were unavailable. The prepared-input path expects correctly matched, projected source tiles. Full-scene 64-pixel-halo stitching, fixed controlled-corruption sweeps, five-seed event bootstrap/Holm analysis, external FC-Siam/ChangeFormer/multimodal comparators and hardware peak-memory timing are not reproduced here. The generic `demo/prepare` path is only an image control; use `prepare_bright` for the event protocol. `mean_latency_ms` from generic evaluation is batched CPU timing, not the paper's warmed device timing.
+The convolutional block details, GroupNorm and shared projections are explicit choices where exact weights/blocks were unavailable. The prepared-input path expects correctly matched, projected source tiles. Evaluation and unlabeled inference now use reflected 512-pixel tiles with 64-pixel halos, stitching their 384-pixel interiors without overlap; `--tile-size` and `--halo` control this common path. The generic `demo/prepare` path is an image control; use `prepare_bright` for the event protocol. `mean_latency_ms` from generic evaluation is batched CPU timing, not the paper's warmed device timing.
+
+### Controlled stress, statistics and concrete baselines
+
+`reliable_change.protocol` implements deterministic, label-independent cloud cover (training optical mean fill, or supplied cloud masks), Gamma speckle in the original SAR intensity domain, and reflected optical/SAR displacement. It preserves missing-modality flags and uses saved training preprocessing. Generate each severity before running the same frozen model:
+
+```bash
+python -m reliable_change.protocol stress --input data/fold0/test.npz --preprocessing data/fold0/preprocessing.json --kind cloud --levels 0.25 --output data/stress
+python -m reliable_change.cli evaluate --input data/stress/cloud_0.25.npz --model runs/full/model.pt --output runs/full/cloud025
+python -m reliable_change.protocol statistics --input data/event_seed_metrics.csv --metric f1 --reference full --output runs/paired_statistics.json
+```
+
+The statistics CSV has `method,event,seed` and metric columns. Seeds are averaged within each held-out event before paired event bootstrap, exact sign-flip testing for small event counts, and Holm correction. This avoids treating five seeds of the same event as independent events.
+
+The shared trainer now accepts `architecture=unet|changeformer|changemamba` in the configuration. U-Net is a trainable four-level early-fusion baseline over seven observations plus two availability planes. ChangeFormer imports the actual [official V6 encoder and decoder](https://github.com/wgcban/ChangeFormer), adapts its two input projections to nine channels and trains all deep-supervision outputs with the same region loss. The two temporal streams carry pre-optical and post-optical/SAR respectively, with unavailable channels zeroed. Both baselines use the same missingness sampling, optimizer, augmentation, validation selection, halo inference and metrics as the main method.
+
+```bash
+git clone https://github.com/wgcban/ChangeFormer third_party/ChangeFormer
+python -m reliable_change.cli train --input data/fold0 --config config.json --set 'architecture="changeformer"' --set 'changeformer_root="third_party/ChangeFormer"' --output runs/changeformer --epochs 120 --batch-size 8
+python baseline_check.py --changeformer-root third_party/ChangeFormer
+```
+
+ChangeMamba likewise imports the official `ChangeMambaBCD` blocks and decoder from [MambaCD](https://github.com/ChenHongruixuan/MambaCD); set `architecture="changemamba"` and `changemamba_root`. Its upstream Triton/selective-scan dependencies need a supported CUDA/Linux environment. On this Windows CPU inspection machine, import fails at the upstream Triton extension, so this adapter is present but not runtime-validated. FC-Siam and the named multimodal comparators M3ICNet/GLCDDA/IncompleteFusion still need their exact author implementations and observation contracts; no substitute model is labeled as one of these methods. Original BRIGHT manifests, retained checkpoints, full training and hardware measurements remain unavailable/unrun.
 
 ```bash
 python smoke_check.py
+python protocol_check.py
 python -m ruff check --no-cache --select F reliable_change smoke_check.py
 ```
 
-Python 3.13.5 / torch 2.7.1+cu118 / CPU threads1 / seed13: generated raw NPZ → event preparation; changing all test/validation pixels leaves fitted training statistics identical. The micro network [4,8,12,16] runs finite loss/backward with nonzero gradients and parameter updates in both stems, shared encoder, projections, gates, decoder and heads; checkpoint reload matches at 1e-6. All three acquisition modes and six ablations execute; event-macro hand cases give F1=.75 and IoU=2/3. A one-epoch CLI train/evaluate/infer/plot check also runs on these generated tiles; unlabeled predictions agree with evaluation at 1e-6. Synthetic data are functionality checks only, and no full training or BRIGHT performance reproduction was run.
+Python 3.13.5 / torch 2.7.1+cu118 / CPU threads1 / seed13: generated raw NPZ → event preparation; changing all test/validation pixels leaves fitted training statistics identical. The micro network [4,8,12,16] runs finite loss/backward with nonzero gradients and parameter updates in both stems, shared encoder, projections, gates, decoder and heads; checkpoint reload matches at 1e-6. All three acquisition modes and six ablations execute; event-macro hand cases give F1=.75 and IoU=2/3. A one-epoch CLI train/evaluate/infer/plot check runs on generated tiles. Additional checks cover exact stitching of a pointwise predictor on odd 65×73 scenes, deterministic label-preserving stress, U-Net gradients/update/reload, and a five-event/five-seed hand case with difference/CI=.2 and exact p=2/32. The official ChangeFormerV6 (checkout `afd1b7ed640aa265a2c730de958416ae7356a2f9`) runs real 64×64 forward/backward through its temporal encoder and every prediction head, updates parameters, and reloads within 1e-6; the shared U-Net CLI train/evaluate/infer also passes. These generated controls validate execution; no full training or BRIGHT performance reproduction was run.

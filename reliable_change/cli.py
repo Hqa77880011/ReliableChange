@@ -7,6 +7,8 @@ import numpy as np
 import torch
 
 from .metrics import measure
+from .protocol import tiled_predict
+from .baselines import build_model
 
 
 def read(path):
@@ -46,6 +48,8 @@ def main():
         p.add_argument("--size", type=int, default=64)
         p.add_argument("--mask", action="store_true")
         p.add_argument("--count", type=int, default=96)
+        p.add_argument('--tile-size', type=int, default=512)
+        p.add_argument('--halo', type=int, default=64)
     args = parser.parse_args()
     config = json.loads(Path(args.config).read_text(encoding='utf-8-sig')) if args.config else {}
     for setting in args.set:
@@ -109,7 +113,7 @@ def main():
         config.setdefault('positive_weight', (data['y'].size-positives)/max(positives, 1.))
         config.setdefault("input_shape", list(data["x"].shape[1:]))
         config.setdefault("classes", int(np.max(data.get("state", data["y"]))) + 1 if data["y"].ndim == 1 and data["y"].dtype.kind in "iu" else 2)
-        network = method.Model(config).to(args.device)
+        network = build_model(config).to(args.device)
         if args.init:
             initial = torch.load(args.init, map_location=args.device, weights_only=True)
             network.load_state_dict(initial["state"])
@@ -158,8 +162,9 @@ def main():
                 indices = np.arange(begin, min(begin + args.batch_size, len(validation["x"])))
                 batch = tensor_batch(validation, indices, args.device)
                 with torch.no_grad():
-                    prediction = network(batch)
-                    total += float(network.objective(batch, prediction)) * len(indices)
+                    prediction = tiled_predict(network, batch, args.tile_size, args.halo)
+                    region_loss = torch.nn.functional.binary_cross_entropy(prediction['probability'].clamp(1e-6,1-1e-6),batch['y'].float())+method.lovasz(prediction['probability'],batch['y'].float())
+                    total += float(region_loss) * len(indices)
                     positive, target = prediction['probability'] >= .5, batch['y'] >= .5
                     true_positive += int((positive & target).sum())
                     false_positive += int((positive & ~target).sum())
@@ -186,7 +191,7 @@ def main():
         from scipy.special import softmax
         from sklearn.metrics import log_loss
         state = torch.load(args.model, map_location=args.device, weights_only=True)
-        network = method.Model(state["config"]).to(args.device)
+        network = build_model(state["config"]).to(args.device)
         network.load_state_dict(state["state"])
         network.eval()
         data = read(args.input)
@@ -215,7 +220,7 @@ def main():
         torch.save(state, out)
     elif args.command in {"evaluate", "infer"}:
         state = torch.load(args.model, map_location=args.device, weights_only=True)
-        network = method.Model(state["config"]).to(args.device)
+        network = build_model(state["config"]).to(args.device)
         network.load_state_dict(state["state"])
         network.eval()
         data = read(args.input)
@@ -227,7 +232,7 @@ def main():
                 torch.cuda.synchronize()
             start = time.perf_counter()
             with torch.no_grad():
-                prediction = network(batch)
+                prediction = tiled_predict(network, batch, args.tile_size, args.halo)
             if "classification_temperature" in state and "probability" in prediction:
                 prediction["probability"] = (prediction["probability"].clamp_min(1e-10).log() / state["classification_temperature"]).softmax(-1)
             if "interval_expansion" in state:

@@ -7,11 +7,13 @@ import numpy as np
 import torch
 
 from .cli import read, tensor_batch
-from .method import Model, event_metrics
+from .method import event_metrics
+from .baselines import build_model
+from .protocol import tiled_predict
 
 
 def evaluate(data, state, batch_size=8):
-    network = Model(state['config']).eval()
+    network = build_model(state['config']).eval()
     network.load_state_dict(state['state'])
     if not (data['available'] == 1).all():
         raise ValueError('Acquisition intervention needs complete measured triplets')
@@ -22,7 +24,7 @@ def evaluate(data, state, batch_size=8):
         with torch.no_grad():
             for begin in range(0, len(data['x']), batch_size):
                 batch = tensor_batch(intervention, np.arange(begin, min(begin+batch_size, len(data['x']))), 'cpu')
-                values.append(network(batch)['probability'].numpy())
+                values.append(tiled_predict(network,batch)['probability'].numpy())
         result[name] = event_metrics(np.concatenate(values), data['y'], data['event'])
     result['worst_mode_f1'] = min(value['event_macro_f1'] for value in result.values())
     for name in ['missing_optical', 'missing_sar']:

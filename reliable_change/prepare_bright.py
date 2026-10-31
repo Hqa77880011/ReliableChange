@@ -28,6 +28,7 @@ def prepare(source, output, fold):
     optical = np.concatenate([x[masks['train'], :3].transpose(0, 2, 3, 1).reshape(-1, 3),
                               x[masks['train'] & (d['available'][:, 0] > 0), 3:6].transpose(0, 2, 3, 1).reshape(-1, 3)])
     lower, upper = np.percentile(optical, [1, 99], axis=0)
+    optical_mean = np.clip((optical-lower)/np.maximum(upper-lower, 1e-6), 0, 1).mean(0)
     for start in [0, 3]:
         x[:, start:start+3] = np.clip((x[:, start:start+3]-lower[None, :, None, None])/
                                       np.maximum(upper-lower, 1e-6)[None, :, None, None], 0, 1)
@@ -50,6 +51,7 @@ def prepare(source, output, fold):
         np.savez_compressed(output/f'{name}.npz', **{key: value[mask] if value.ndim and len(value) == len(x) else value for key, value in d.items()})
     state = dict(fold=fold, test_event=EVENTS[fold], validation_event=EVENTS[(fold+1) % 5],
                  optical_lower=lower.tolist(), optical_upper=upper.tolist(),
+                 optical_mean=optical_mean.tolist(),
                  sar_lower=float(sar_low), sar_upper=float(sar_high), sar_mean=sar_mean, sar_std=sar_std)
     (output/'preprocessing.json').write_text(json.dumps(state, indent=2), encoding='utf-8')
     return state
