@@ -77,13 +77,18 @@ def main():
     assert np.isclose(values['event_macro_f1'], .75)
     assert np.isclose(values['event_macro_iou'], 2/3)
     (root/'config.json').write_text(json.dumps(c), encoding='utf-8')
+    held_out = read(root/'prepared/test.npz')
+    np.savez_compressed(root/'unlabeled.npz', x=held_out['x'], available=held_out['available'])
     for command in [
         ['train', '--input', str(root/'prepared'), '--output', str(root/'cli'), '--config', str(root/'config.json'), '--epochs', '1', '--batch-size', '2'],
         ['evaluate', '--input', str(root/'prepared/test.npz'), '--output', str(root/'cli/evaluation'), '--model', str(root/'cli/model.pt')],
+        ['infer', '--input', str(root/'unlabeled.npz'), '--output', str(root/'cli/inference'), '--model', str(root/'cli/model.pt')],
         ['plot', '--input', str(root/'cli'), '--output', str(root/'figures')],
     ]:
         sys.argv = ['reliable-change']+command
         cli_main()
+    np.testing.assert_allclose(np.load(root/'cli/inference/predictions.npz')['probability'],
+                               np.load(root/'cli/evaluation/predictions.npz')['probability'], atol=1e-6)
     print(f'PASS loss={float(loss.detach()):.6f}: train-only preprocessing, full graph backward/update, reload, three modes, six ablations, hand event-macro metrics')
 
 

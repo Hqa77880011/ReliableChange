@@ -27,7 +27,7 @@ def main():
     from . import method
     parser = argparse.ArgumentParser()
     sub = parser.add_subparsers(dest="command", required=True)
-    for name in ["demo", "prepare", "train", "evaluate", "plot", "pack", "calibrate"] + (["execute"] if hasattr(method, "execute") else []):
+    for name in ["demo", "prepare", "train", "evaluate", "infer", "plot", "pack", "calibrate"] + (["execute"] if hasattr(method, "execute") else []):
         p = sub.add_parser(name)
         p.add_argument("--output", required=True)
         p.add_argument("--input")
@@ -53,7 +53,7 @@ def main():
         config[key] = json.loads(value)
     config["variant"] = args.variant
     out = Path(args.output)
-    if args.command in {"train", "evaluate", "plot", "prepare"}:
+    if args.command in {"train", "evaluate", "infer", "plot", "prepare"}:
         out.mkdir(parents=True, exist_ok=True)
     else:
         out.parent.mkdir(parents=True, exist_ok=True)
@@ -213,7 +213,7 @@ def main():
             rank = int(np.ceil((len(unit)+1)*.9))
             state["interval_expansion"] = float(np.sort(unit)[rank-1]) if rank <= len(unit) else float("inf")
         torch.save(state, out)
-    elif args.command == "evaluate":
+    elif args.command in {"evaluate", "infer"}:
         state = torch.load(args.model, map_location=args.device, weights_only=True)
         network = method.Model(state["config"]).to(args.device)
         network.load_state_dict(state["state"])
@@ -245,8 +245,8 @@ def main():
                 if isinstance(value, torch.Tensor) and value.ndim and len(value) == len(indices):
                     stored.setdefault(key, []).append(value.detach().cpu().numpy())
         result = {key: np.concatenate(values) for key, values in stored.items()}
-        values = measure(result, data)
-        if hasattr(method, "measure"):
+        values = measure(result, data) if args.command == "evaluate" else {}
+        if args.command == "evaluate" and hasattr(method, "measure"):
             values.update(method.measure(result, data, state["config"]))
         values.update(parameters=sum(p.numel() for p in network.parameters()),
                       mean_latency_ms=1000 * float(np.mean(elapsed)),
