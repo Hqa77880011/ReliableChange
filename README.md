@@ -111,7 +111,7 @@ ChangeMamba imports the official `ChangeMambaBCD` blocks and decoder from [Mamba
 python scan_siam_check.py --fc-siam-root third_party/FC-Siam --changemamba-root third_party/MambaCD --glcd-da-root third_party/GLCD-DA
 ```
 
-Executed on CPU: original FC-Siam-diff (1,351,010 parameters, loss1.862256765), FC-Siam-conc (1,546,850, loss1.608351707), full ChangeMamba (32,616,098, loss1.496650219), and GLCD-DA CD stage (35,830,739, loss3.727034569) each pass backward, actual parameter update and independent model reload at 1e-6. Inputs are generated 2x32px (GLCD 2x64px), including an unavailable modality. A separate recurrence hand case gives outputs[1,1.5] and input gradients[1.5,1]. Source revisions are FC-Siam `4dd83231f25319a7ebb16cbfa9912541ceabac9a`, GLCD-DA `085655cf4f4dfe64b55b9dfaa3a838bc61b9b289`; the ChangeMamba config is the author's `vssm_tiny_224_0229flex.yaml`. These are execution checks, not trained BRIGHT scores.
+Executed on CPU: original FC-Siam-diff (1,351,010 parameters, loss1.862256765), FC-Siam-conc (1,546,850, loss1.608351707), full ChangeMamba (32,616,098, loss1.496650219), and GLCD-DA CD stage (35,830,739, loss3.727034569) each pass backward, actual parameter update and independent model reload at 1e-6. Inputs are generated 2x32px (GLCD 2x64px), including an unavailable modality. A separate recurrence hand case gives outputs[1,1.5] and input gradients[1.5,1]. Source revisions are FC-Siam `4dd83231f25319a7ebb16cbfa9912541ceabac9a`, GLCD-DA `085655cf4f4dfe64b55b9dfaa3a838bc61b9b289`; MambaCD `9ce9cec13f9ea14bc0ad91f071577ec9b3a97983`; the ChangeMamba config is the author's `vssm_tiny_224_0229flex.yaml`. These are execution checks, not trained BRIGHT scores.
 
 ```bash
 python smoke_check.py
