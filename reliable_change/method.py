@@ -1,4 +1,4 @@
-"""Availability-masked multiscale change detector and paper objectives."""
+"""Availability-masked multiscale change detector and training objectives."""
 import numpy as np
 import torch
 from torch import nn
