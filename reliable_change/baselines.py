@@ -1,5 +1,7 @@
 """Dense baselines sharing observed channels, availability masks and region loss."""
 import sys
+import importlib.util
+from contextlib import contextmanager
 from types import SimpleNamespace
 from pathlib import Path
 
@@ -8,6 +10,24 @@ from torch import nn
 from torch.nn import functional as F
 
 from .method import block, lovasz, Model
+
+
+@contextmanager
+def external_imports(root):
+    """Isolate author projects which both publish a top-level models package."""
+    prefixes=('models','Unet')
+    saved={k:v for k,v in sys.modules.items() if k.split('.')[0] in prefixes}
+    for key in saved:
+        del sys.modules[key]
+    sys.path.insert(0,str(root))
+    try:
+        yield
+    finally:
+        for key in list(sys.modules):
+            if key.split('.')[0] in prefixes:
+                del sys.modules[key]
+        sys.modules.update(saved)
+        sys.path.remove(str(root))
 
 
 class EarlyFusionUNet(nn.Module):
@@ -63,9 +83,9 @@ class ChangeFormer(nn.Module):
         root=Path(c['changeformer_root']).resolve()
         if not (root/'models/ChangeFormer.py').is_file():
             raise FileNotFoundError('changeformer_root must be the official wgcban/ChangeFormer checkout')
-        sys.path.insert(0,str(root))
-        from models.ChangeFormer import ChangeFormerV6
-        self.network=ChangeFormerV6(input_nc=9,output_nc=2,embed_dim=256)
+        with external_imports(root):
+            from models.ChangeFormer import ChangeFormerV6
+            self.network=ChangeFormerV6(input_nc=9,output_nc=2,embed_dim=256)
 
     def forward(self,b):
         x=b['x'].float()
@@ -73,6 +93,8 @@ class ChangeFormer(nn.Module):
         planes=available[:,:,None,None].expand(-1,-1,*x.shape[-2:])
         first=torch.cat([x[:,:3],torch.zeros_like(x[:,3:7]),planes],1)
         second=torch.cat([torch.zeros_like(x[:,:3]),x[:,3:6]*available[:,0,None,None,None],x[:,6:7]*available[:,1,None,None,None],planes],1)
+        if hasattr(self,'input_projection'):
+            first,second=self.input_projection(first),self.input_projection(second)
         result=self.network(first,second)
         logits=result[-1] if isinstance(result,(list,tuple)) else result
         logits=F.interpolate(logits,x.shape[-2:],mode='bilinear',align_corners=False)
@@ -98,6 +120,14 @@ class ChangeMamba(ChangeFormer):
         if not (root/'changedetection/models/ChangeMambaBCD.py').is_file():
             raise FileNotFoundError('changemamba_root must point to ChenHongruixuan/MambaCD')
         sys.path.insert(0,str(root))
+        backend=c.get('changemamba_backend','native')
+        if backend=='reference':
+            from .reference_scan import install
+            install()
+        elif backend!='native':
+            raise ValueError('changemamba_backend must be native or reference')
+        elif getattr(sys.modules.get('changedetection.models.vmamba'),'reliable_reference',False):
+            raise RuntimeError('Use a fresh process for the native ChangeMamba backend')
         from changedetection.configs.config import get_config
         from changedetection.script.script_utils import get_vssm_kwargs
         from changedetection.models.ChangeMambaBCD import ChangeMambaBCD
@@ -106,6 +136,41 @@ class ChangeMamba(ChangeFormer):
         kwargs=get_vssm_kwargs(config)
         kwargs['in_chans']=9
         self.network=ChangeMambaBCD(pretrained=c.get('pretrained_encoder'),**kwargs)
+
+
+class FCSiam(ChangeFormer):
+    """Original FC-Siam difference/concatenation U-Net on observed streams."""
+    def __init__(self,c):
+        nn.Module.__init__(self)
+        self.c=c
+        root=Path(c['fc_siam_root']).resolve()
+        variant=c['architecture'].removeprefix('fc_siam_')
+        filename='siamunet_'+variant
+        path=root/(filename+'.py')
+        if not path.is_file():
+            raise FileNotFoundError('fc_siam_root must point to rcdaudt/fully_convolutional_change_detection')
+        spec=importlib.util.spec_from_file_location('_reliable_'+filename,path)
+        module=importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        self.network=getattr(module,'SiamUnet_'+variant)(9,2)
+
+
+class GLCDDetection(ChangeFormer):
+    """Author GLCD-DA CD stage with an explicit observed-input projection."""
+    def __init__(self,c):
+        nn.Module.__init__(self)
+        self.c=c
+        root=Path(c['glcd_da_root']).resolve()
+        if not (root/'models/networks.py').is_file():
+            raise FileNotFoundError('glcd_da_root must point to WHU-SGG-RS-Pro-Group/ChangeDetection-GLCD-DA')
+        self.input_projection=nn.Conv2d(9,3,1)
+        with external_imports(root):
+            from models.networks import BASE_Transformer
+            from models import laplace
+            # Author kernels unconditionally call .cuda() before .to(img.device).
+            # Keep the identical coefficients while permitting CPU and nondefault GPUs.
+            laplace.gauss_kernel.__defaults__=(3,False)
+            self.network=BASE_Transformer(input_nc=3,output_nc=2,with_pos='learned',resnet_stages_num=4)
 
 
 def build_model(c):
@@ -119,4 +184,8 @@ def build_model(c):
         return ChangeFormer(c)
     if name=='changemamba':
         return ChangeMamba(c)
+    if name in {'fc_siam_diff','fc_siam_conc'}:
+        return FCSiam(c)
+    if name=='glcd_da_cd':
+        return GLCDDetection(c)
     raise ValueError('Unknown architecture: '+name)
